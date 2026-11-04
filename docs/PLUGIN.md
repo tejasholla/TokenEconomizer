@@ -1,11 +1,18 @@
 # The plugin: design and verified agent behaviour
 
 How the plugin runs the three mechanisms inside your own Claude Code, Codex, Copilot CLI, Pi,
-opencode and Cursor sessions, through the hooks (on Pi, the extension events) each agent
-exposes: what it does at each hook, what differs from the experiments and why, the agent
-behaviour each choice rests on, where its state lives, and its known limitations. The code is `tokeneconomizer/plugin/` (what
-the hooks run) and `plugin/` (the packaging for each agent). To install and use it, see
-[`plugin/README.md`](../plugin/README.md).
+opencode, Cursor and Antigravity (agy) sessions, through the hooks (on Pi, the extension events)
+each agent exposes: what it does at each hook, what differs from the experiments and why, the
+agent behaviour each choice rests on, where its state lives, and its known limitations. The
+code is `tokeneconomizer/plugin/` (what the hooks run) and `plugin/` (the packaging for each
+agent). To install and use it, see [`plugin/README.md`](../plugin/README.md).
+
+Antigravity is the only supported agent that does **not** use Claude Code's hook protocol: its
+event names differ, its payload does not name the event itself, and one user prompt fires
+`PreInvocation` more than once. The host adapter in
+[`tokeneconomizer/plugin/hosts.py`](../tokeneconomizer/plugin/hosts.py) and the transcript reader
+in [`tokeneconomizer/trace/agy.py`](../tokeneconomizer/trace/agy.py) bridge those differences so
+the three mechanisms stay agent-agnostic.
 
 ---
 

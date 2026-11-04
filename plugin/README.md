@@ -1,12 +1,14 @@
 # TokenEconomizer plugin
 
 How to install and use TokenEconomizer in Claude Code, Codex, the GitHub Copilot CLI, Pi, Cursor
-(experimental), and opencode (experimental). What the plugin does and why is in the [main README](../README.md); its
-design and the verified behaviour of each agent are in [`docs/PLUGIN.md`](../docs/PLUGIN.md).
+(experimental), opencode (experimental) and Antigravity / agy (experimental). What the plugin
+does and why is in the [main README](../README.md); its design and the verified behaviour of
+each agent are in [`docs/PLUGIN.md`](../docs/PLUGIN.md).
 
 - [Before you start](#before-you-start)
 - Install and use it on [Claude Code](#claude-code) · [Codex](#codex) ·
-  [Copilot CLI](#copilot-cli) · [Pi](#pi) · [Cursor](#cursor)
+  [Copilot CLI](#copilot-cli) · [Pi](#pi) · [Cursor](#cursor) ·
+  [Antigravity (agy)](#antigravity-agy)
 - [What to expect](#what-to-expect) · [Commands](#commands) · [Settings](#settings)
 - [Repository map](#repository-map) · [Using with rtk](#using-with-rtk) ·
   [Model calls and API keys](#model-calls-and-api-keys) · [Troubleshooting](#troubleshooting)
@@ -375,6 +377,73 @@ still-stuck notice was printed (`opencode run`) and the first notice shown as a 
 toast. A `read`, `task` or `*` permission denial stalls opencode 1.19.5 at start-up, which is why
 the side call denies only `bash`, `edit`, `webfetch` and `websearch`.
 
+## Antigravity (agy)
+
+**1. Install.** Antigravity looks for plugins in `~/.gemini/antigravity-cli/plugins/`. Symlink
+the whole `plugin/` directory under the name `tokeneconomizer` so the hook manifest at
+`<plugin>/hooks.json` and the manifest at `<plugin>/.antigravity-plugin/plugin.json` are both
+where agy expects them:
+
+```bash
+mkdir -p ~/.gemini/antigravity-cli/plugins
+ln -s /path/to/TokenEconomizer/plugin ~/.gemini/antigravity-cli/plugins/tokeneconomizer
+```
+
+Restart agy after the link so it re-reads the plugin directory. Python 3.10+ on `PATH`, or
+`TE_PYTHON=/path/to/python3.10+`.
+
+**2. Check it.** Run a session in any repository (agy only runs on a configured workspace), then
+`~/.tokeneconomizer/bin/te --host agy status` in the same folder. agy has no plugin slash
+commands, so every command runs from a terminal. Tool pruning does not apply (agy has no public
+deny surface). Micro-skills is off by default: `te --host agy config set microskills=on` (or
+`envfacts`, without model calls).
+
+**Why agy uses `TE_AGY_EVENT`.** Antigravity's hook payload names the conversation, the model,
+the workspace and the tool call — but **not the event**. The plugin's `plugin/hooks.json` works
+around this by tagging each handler with the event it stands for as an environment variable
+(`TE_AGY_EVENT=SessionStart`, `…=PreInvocation`, `…=PreToolUse`, `…=PostToolUse`, `…=Stop`), and
+the dispatcher reads it before doing anything else. The host adapter maps those events to the
+Claude Code envelope the rest of the runtime speaks:
+
+| agy event | What it carries | Maps to |
+|---|---|---|
+| `SessionStart` | workspace paths, conversation id | `SessionStart` (micro-skills are injected once) |
+| `PreInvocation` | `lastUserInput`, `invocationNum`, model name | `UserPromptSubmit` (agy has no prompt event; this fires before every model call) |
+| `PreToolUse` | `toolCall = {name, args}` | `PreToolUse` (the loop guard sees the call before it runs) |
+| `PostToolUse` | `toolCall` + result text or `error` | `PostToolUse` / `PostToolUseFailure` |
+| `Stop` | end-of-turn | `Stop` (closes the turn) |
+
+**One user prompt, several `PreInvocation`s.** agy calls the model in a loop while working on
+one user prompt, so a single user message fires `PreInvocation` more than once. The adapter
+flips `prompt_repeats_in_turn = True` so the loop guard keeps the same turn open across them
+instead of closing and reopening it on every model call. The turn key is the conversation id,
+not the step index.
+
+**Transcript reader.** Each conversation's transcript is a JSONL file at
+`~/.gemini/antigravity-cli/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`.
+The reader in `tokeneconomizer/trace/agy.py` walks it and writes the same Claude Code envelope
+every other host produces (`user` / `assistant` / `tool_use` / `tool_result`), so the mechanisms
+need no Antigravity branch. The CLI's `<USER_REQUEST>` and `<ADDITIONAL_METADATA>` tags around
+the user's text are stripped, and per-step usage (`input_tokens`, `cache_read_tokens`,
+`output_tokens`) is summed into the assistant message's `usage` block for the ledger.
+
+**Model calls.** The proposer and the loop guard's judge run through `agy --output-format json
+-p <prompt>` on your default agy model (`paid_model` names another). One JSON object answers:
+`response` is the text, `usage` carries the run's token counts (input, cache_read, output,
+total), which the ledger prices directly. A run that could not make the call answers
+`status: "ERROR"` with its reason in `error`, which is recorded like any other failed call.
+
+**Verified against agy 1.4.7,** with synthetic payloads and a synthetic transcript (see
+`tests/test_agy.py`): the host adapter translates every event into the Claude Code envelope;
+`agy_session_to_claude` produces the same shape every other host produces; `agy_session_usage`
+sums the per-step usage; a missing transcript returns `None` instead of raising; the dispatcher's
+`--host agy` path is exercised by a live subprocess run with `TE_DISABLE=1`.
+
+**Not covered:** tool pruning (agy exposes no public deny surface); the `agy --continue` /
+`--resume` flags for a previous conversation (the plugin treats a continued conversation as one
+session, which is what `conversationId` says it is); and the Antigravity web client, whose
+hooks protocol is not the same as the CLI's.
+
 ## What to expect
 
 The plugin works session by session: what it learns from a repository's earlier sessions is
@@ -657,4 +726,4 @@ and only when you run it.
 | the deny list leaves nothing out after many sessions | run `toolprune refresh-catalog` (Claude Code, Copilot) |
 | a Codex deny list was applied but nothing changed | trust the project in Codex; `~/.tokeneconomizer/bin/te --host codex doctor` says whether it is trusted |
 | errors.log has `sidecall copilot: no reply`, and a session start says the plugin's model calls are paused | they cannot use a Copilot BYOK provider ([Copilot CLI](#copilot-cli)): micro-skills keeps its facts that need no model call (`microskills=envfacts` stops trying the proposer), and the loop guard redirects only at its backstop. Once Copilot is signed in, `config set microskills=on` (or `loopguard=on`) tries again |
-| `te` shows another agent's state | add `--host claude`, `codex`, `copilot` or `pi` |
+| `te` shows another agent's state | add `--host claude`, `codex`, `copilot`, `pi`, `cursor`, `opencode` or `agy` |
