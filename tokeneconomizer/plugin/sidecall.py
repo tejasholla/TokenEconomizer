@@ -391,6 +391,48 @@ def cursor_call(prompt, model="", cli="cursor-agent", timeout=TIMEOUT_S):
     return text or "", None
 
 
+def agy_call(prompt, model="", cli="agy", timeout=TIMEOUT_S):
+    """Use Antigravity for optimizer calls in an empty directory.
+
+    `agy --output-format json -p` answers with one JSON object: the reply in `response` and
+    the usage of the run in `usage` (`input_tokens`, `output_tokens`,
+    `cache_read_tokens`, `total_tokens`), which the ledger prices directly. A run that could
+    not make the call answers `status: "ERROR"` with its reason in `error` (a quota, a sign-in
+    that needs attention), which is recorded like any other failed call.
+    """
+    with tempfile.TemporaryDirectory(prefix="te-side-", ignore_cleanup_errors=True) as cwd:
+        cmd = [*program(cli), "--output-format", "json", "-p"]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(prompt)
+        out = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
+                             timeout=timeout, env=_env(), cwd=cwd, stdin=subprocess.DEVNULL)
+    try:
+        data = json.loads(out.stdout or "{}")
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if str(data.get("status") or "").upper() == "ERROR":
+        _no_reply("agy", type("R", (), {"stdout": str(data.get("error") or ""),
+                                        "stderr": out.stderr or ""})())
+        return "", None
+    text = str(data.get("response") or "")
+    if not text:
+        _no_reply("agy", out)
+        return "", None
+    u = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    usage = {
+        "input_tokens": int(u.get("input_tokens") or 0),
+        "cache_read_input_tokens": int(u.get("cache_read_tokens") or 0),
+        "cache_creation_input_tokens": 0,
+        "output_tokens": int(u.get("output_tokens") or 0),
+        "model": model or "agy",
+    }
+    eff, _ = accounting.effective(usage)
+    return text, eff
+
+
 # Everything the Copilot CLI offers (1.0.83 names), so the completion is offered nothing; a name
 # the installed CLI does not know is ignored.
 COPILOT_TOOLS = ("bash", "read_bash", "write_bash", "stop_bash", "list_bash", "view", "grep",
@@ -461,7 +503,8 @@ def copilot_call(prompt, model="", cli="copilot", timeout=TIMEOUT_S):
 
 
 # The command each agent's side calls run, as the notices name it; the rest run `<agent> -p`.
-_CALLS = {"codex": "codex exec", "opencode": "opencode run", "cursor": "cursor-agent -p"}
+_CALLS = {"codex": "codex exec", "opencode": "opencode run", "cursor": "cursor-agent -p",
+          "agy": "agy --output-format json -p"}
 
 
 def call_name(host_name):
@@ -483,6 +526,8 @@ def runner_for(host_name, config):
         return lambda prompt, _m="agent": opencode_call(prompt, model=model)
     if host_name == "cursor":
         return lambda prompt, _m="agent": cursor_call(prompt, model=model)
+    if host_name == "agy":
+        return lambda prompt, _m="agent": agy_call(prompt, model=model)
     if host_name == "codex":
         return lambda prompt, _m="agent": codex_call(prompt, model=model)
     if host_name == "copilot":

@@ -262,8 +262,13 @@ class LiveController:
         if self.cfg.loopguard != "off":
             # A turn still open here never reached Stop -- the person interrupted it. Its
             # outcome is unknown, so it is recorded but does not feed the envelope.
-            self._close_turn(s, stopped_normally=False)
-            s["turn"] = loopguard.TurnGuard(turn_key=self.host.turn_key(self.p)).to_dict()
+            if not (self.host.prompt_repeats_in_turn and s.get("turn")):
+                # Antigravity's prompt event fires once per MODEL CALL, so a turn that is
+                # already open is the same user request continuing: closing and reopening it
+                # here would split one request into several turns and lose what the guard
+                # learned in the earlier ones.
+                self._close_turn(s, stopped_normally=False)
+                s["turn"] = loopguard.TurnGuard(turn_key=self.host.turn_key(self.p)).to_dict()
         self._save(s)
         return merge_outputs(*outputs) if outputs else {}
 

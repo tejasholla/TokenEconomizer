@@ -1,0 +1,44 @@
+{
+  "tokeneconomizer": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "TE_AGY_EVENT=SessionStart \"${PLUGIN_ROOT}/scripts/te-hook\" --host agy"
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "TE_AGY_EVENT=PreInvocation \"${PLUGIN_ROOT}/scripts/te-hook\" --host agy"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TE_AGY_EVENT=PreToolUse \"${PLUGIN_ROOT}/scripts/te-hook\" --host agy"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TE_AGY_EVENT=PostToolUse \"${PLUGIN_ROOT}/scripts/te-hook\" --host agy"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "TE_AGY_EVENT=Stop \"${PLUGIN_ROOT}/scripts/te-hook\" --host agy"
+      }
+    ]
+  }
+}

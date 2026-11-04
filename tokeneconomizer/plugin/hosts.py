@@ -116,6 +116,10 @@ class Host:
     end_run = "Press Ctrl+C to end the run."
     # Whether context returned from UserPromptSubmit reaches the model (verified per host).
     prompt_context = False
+    # Whether the host's prompt event can fire more than once in one turn. Antigravity's
+    # `PreInvocation` runs before every MODEL CALL, so one user request sends several; the
+    # guard's turn must not be closed and reopened by each of them.
+    prompt_repeats_in_turn = False
 
     def session_id(self, p):
         return str(p.get("session_id") or "")
@@ -319,6 +323,127 @@ class Codex(Host):
 
     def prompt_count(self, transcript_path):
         return trace.codex_prompt_count(transcript_path)
+
+
+class Antigravity(Host):
+    """Antigravity (agy), through the plugin in `plugin/agy/`.
+
+    Antigravity has a hook protocol of its own, and it is not Claude Code's: its plugin
+    reads `hooks.json` at the plugin root, its hooks are NAMED (a map of name to event to
+    handlers), and its events are `SessionStart`, `PreInvocation`, `PreToolUse`,
+    `PostToolUse` and `Stop`. Its payload names the conversation, the model, the workspace
+    and the tool call, but it does NOT name the event -- so the plugin's own `hooks.json`
+    tells the dispatcher which event each handler is, and the payload is translated into
+    the Claude Code envelope the rest of the plugin speaks.
+
+    What the translation has to bridge:
+
+      * the conversation is the session (`conversationId`), and the transcript is
+        `transcriptPath` -- a JSONL file under the conversation's own directory, which
+        `trace.agy` reads;
+      * `workspacePaths` is the working directory (the first path), where a Claude Code
+        payload would carry `cwd`;
+      * the tool call is `toolCall` ({name, args}) where Claude Code sends `tool_name` and
+        `tool_input`;
+      * there is no turn identity: Antigravity stamps `stepIdx` on the tool events and
+        `invocationNum` on `PreInvocation`, which together name the turn.
+
+    Antigravity's hooks have no `UserPromptSubmit` and no `SessionEnd`: `PreInvocation`
+    runs before every model call (so it stands in for the prompt turn, and its
+    `invocationNum` says which call it is) and `Stop` ends the turn (and, with
+    `fullyIdle`, the session). The plugin's `hooks.json` therefore maps `PreInvocation` to
+    the prompt turn and `Stop` to the turn end.
+    """
+    name = "agy"
+    # Antigravity's own notice surface: a hook's `systemMessage` is shown by the client.
+    prompt_context = False
+    # `PreInvocation` runs before every model call, so one user request sends several.
+    prompt_repeats_in_turn = True
+    # The plugin's `hooks.json` names the event per handler; the dispatcher is told which.
+    _EVENTS = {
+        "SessionStart": "SessionStart",
+        "PreInvocation": "UserPromptSubmit",
+        "PreToolUse": "PreToolUse",
+        "PostToolUse": "PostToolUse",
+        "Stop": "Stop",
+    }
+
+    def session_id(self, p):
+        return str(p.get("conversationId") or "")
+
+    def transcript(self, p):
+        return p.get("transcriptPath") or ""
+
+    def cwd(self, p, env):
+        paths = p.get("workspacePaths")
+        if isinstance(paths, list) and paths:
+            return str(paths[0])
+        return super().cwd(p, env)
+
+    def prepare(self, payload, env):
+        """Translate an Antigravity payload into the Claude Code envelope.
+
+        Antigravity does not name the event in the payload, so the plugin's own `hooks.json`
+        tells the dispatcher which event each handler is (`--event` on the command line), and
+        that name is read from the environment. The mapping:
+
+          * `SessionStart`   -> `SessionStart` (the repository's facts, injected once);
+          * `PreInvocation`  -> `UserPromptSubmit` (Antigravity has no prompt event; this
+            runs before every model call, so `invocationNum` says which call it is);
+          * `PreToolUse`     -> `PreToolUse` (the guard sees the call before it runs);
+          * `PostToolUse`    -> `PostToolUse` (the guard sees the result);
+          * `Stop`           -> `Stop` (the turn ended).
+
+        Antigravity's own fields are kept: the conversation is the session, the transcript is
+        the conversation's JSONL, the workspace is the working directory, and the tool call is
+        `toolCall`.
+        """
+        p = dict(payload or {})
+        event = str(env.get("TE_AGY_EVENT") or "").strip()
+        p["hook_event_name"] = self._EVENTS.get(event, "")
+        p["session_id"] = p.get("conversationId") or ""
+        p["transcript_path"] = p.get("transcriptPath") or ""
+        paths = p.get("workspacePaths")
+        p["cwd"] = str(paths[0]) if isinstance(paths, list) and paths else os.getcwd()
+        call = p.get("toolCall") if isinstance(p.get("toolCall"), dict) else {}
+        if call:
+            p["tool_name"] = call.get("name") or ""
+            p["tool_input"] = call.get("args") if isinstance(call.get("args"), dict) else {}
+            p["tool_use_id"] = f"agy-{p.get('stepIdx', 0)}"
+        p["prompt_id"] = str(p.get("conversationId") or "")
+        p["prompt"] = p.get("lastUserInput") or ""
+        if p["hook_event_name"] == "SessionStart":
+            p["source"] = "startup"
+        if p["hook_event_name"] in ("PostToolUse", "PostToolUseFailure"):
+            error = p.get("error")
+            p["tool_response"] = {"content": str(error) if error else "",
+                                   "isError": bool(error), "exit_code": None}
+        return p
+
+    def turn_key(self, p):
+        # The conversation is the turn: Antigravity has no per-turn id, and its prompt event
+        # fires once per model call, so the step index would split one user request into
+        # several turns.
+        return str(p.get("conversationId") or "")
+
+    def tool_call(self, p):
+        call = p.get("toolCall") if isinstance(p.get("toolCall"), dict) else {}
+        name = str(call.get("name") or "")
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        error = p.get("error")
+        text = str(error) if error else ""
+        return name, args, text, None
+
+    def mechanism_trace(self, transcript_path, workdir):
+        out = os.path.join(workdir, "agy_trace.jsonl")
+        n = trace.agy_session_to_claude(transcript_path, out)
+        return out if n is not None else None
+
+    def session_usage(self, transcript_path):
+        return trace.agy_session_usage(transcript_path)
+
+    def prompt_count(self, transcript_path):
+        return trace.agy_prompt_count(transcript_path)
 
 
 class Pi(Host):
@@ -700,7 +825,7 @@ def _ancestor_args(limit=4):
 
 
 HOSTS = {"claude": ClaudeCode, "codex": Codex, "copilot": Copilot, "opencode": OpenCode,
-         "pi": Pi, "cursor": Cursor}
+         "pi": Pi, "cursor": Cursor, "agy": Antigravity}
 
 
 def default_host(env=None, recent=None):

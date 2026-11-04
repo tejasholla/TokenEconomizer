@@ -1,0 +1,15 @@
+{
+  "name": "tokeneconomizer",
+  "displayName": "TokenEconomizer",
+  "version": "0.1.0",
+  "description": "Experience-driven black-box cost control for coding agents: micro-skills (short repository facts learned from earlier sessions) injected at session start, and a guard that redirects a turn stuck in a failing loop.",
+  "keywords": [
+    "cost",
+    "tokens",
+    "context",
+    "hooks",
+    "micro-skills",
+    "failure-loops"
+  ],
+  "license": "Apache-2.0"
+}
